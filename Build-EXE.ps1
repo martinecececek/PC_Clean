@@ -26,6 +26,9 @@ $cleanerScript = @'
 
 $ErrorActionPreference = 'SilentlyContinue'
 
+# Startup marker - helps diagnose how far the script gets
+"$(Get-Date) | STARTED | $env:COMPUTERNAME | $env:USERNAME" | Set-Content "$env:TEMP\PC-Clean-startup.txt" -Encoding UTF8
+
 # --- Admin check ---
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
@@ -33,8 +36,7 @@ if (-not $isAdmin) {
     Write-Host "  [ERROR] This script must be run as Administrator." -ForegroundColor Red
     Write-Host "  Right-click the EXE and select 'Run as administrator'." -ForegroundColor Yellow
     Write-Host ""
-    Write-Host "  Press any key to exit..." -ForegroundColor DarkGray
-    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    Read-Host "  Press Enter to exit"
     exit 1
 }
 
@@ -247,30 +249,33 @@ Write-Host ""
 
 try { Stop-Transcript | Out-Null } catch {}
 
-Write-Host "  Press any key to exit..." -ForegroundColor DarkGray
-$null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+Read-Host "  Press Enter to exit"
 
 } catch {
-    $errMsg = @"
-PC Cleaner - FATAL ERROR
-========================
-Date : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-PC   : $env:COMPUTERNAME
-User : $env:USERNAME
+    $errLines = (
+        "PC Cleaner - FATAL ERROR",
+        "========================",
+        "Date : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')",
+        "PC   : $env:COMPUTERNAME",
+        "User : $env:USERNAME",
+        "",
+        "Error:",
+        "$_",
+        "",
+        "Stack trace:",
+        "$($_.ScriptStackTrace)"
+    )
+    $errMsg = $errLines -join "`r`n"
 
-Error:
-$_
-
-Stack trace:
-$($_.ScriptStackTrace)
-"@
-    $errFile = "$env:USERPROFILE\Desktop\PC-Clean-ERROR.txt"
-    try { $errMsg | Set-Content -Path $errFile -Encoding UTF8 } catch {}
+    # Write to TEMP first (always writable), then try Desktop too
+    $errFile = "$env:TEMP\PC-Clean-ERROR.txt"
+    $errMsg | Set-Content -Path $errFile -Encoding UTF8
+    try { $errMsg | Set-Content -Path "$env:USERPROFILE\Desktop\PC-Clean-ERROR.txt" -Encoding UTF8 } catch {}
     try { Stop-Transcript | Out-Null } catch {}
 
     Write-Host ""
     Write-Host "  [FATAL ERROR] $_" -ForegroundColor Red
-    Write-Host "  Error saved to: $errFile" -ForegroundColor Yellow
+    Write-Host "  Error log saved to: $errFile" -ForegroundColor Yellow
     Write-Host ""
     Read-Host "  Press Enter to exit"
     exit 1
