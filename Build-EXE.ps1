@@ -56,13 +56,34 @@ function Remove-Items([string]$path, [string]$label) {
     }
 }
 
-function Get-DiskFreeGB([string]$drive = 'C') {
-    $disk = Get-PSDrive -Name $drive -ErrorAction SilentlyContinue
+function Get-DiskFreeGB([string]$driveLetter) {
+    $disk = Get-PSDrive -Name $driveLetter -ErrorAction SilentlyContinue
     if ($disk) { return [math]::Round($disk.Free / 1GB, 2) }
     return 0
 }
 
+function Clean-BrowserProfiles([string]$userDataRoot, [string]$browser) {
+    if (-not (Test-Path $userDataRoot)) {
+        Write-Skip "$browser — not installed"
+        return
+    }
+    $profiles = Get-ChildItem -Path $userDataRoot -Directory -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match '^(Default|Profile \d+)$' }
+    if (-not $profiles) {
+        Write-Skip "$browser — no profiles found"
+        return
+    }
+    foreach ($profile in $profiles) {
+        $label = if ($profile.Name -eq 'Default') { $browser } else { "$browser [$($profile.Name)]" }
+        Remove-Items -path "$($profile.FullName)\Cache"      -label "$label Cache"
+        Remove-Items -path "$($profile.FullName)\Code Cache" -label "$label Code Cache"
+    }
+}
+
 # ─── Startup ─────────────────────────────────────────────────────────────────
+
+$winDrive   = $env:SystemDrive.TrimEnd('\')
+$driveLetter = $winDrive.TrimEnd(':')
 
 $logPath = "$env:USERPROFILE\Desktop\PC-Clean-Log.txt"
 Start-Transcript -Path $logPath -Force | Out-Null
@@ -76,11 +97,12 @@ Write-Host "  ██║     ╚██████╗   ╚██████╗�
 Write-Host "  ╚═╝      ╚═════╝    ╚═════╝╚══════╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝" -ForegroundColor Magenta
 Write-Host ""
 Write-Host "  Safe PC Cleaner — $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor White
+Write-Host "  Windows drive: $winDrive  |  User: $env:USERNAME  |  PC: $env:COMPUTERNAME" -ForegroundColor DarkGray
 Write-Host "  Log: $logPath" -ForegroundColor DarkGray
 Write-Host ""
 
-$freeBefore = Get-DiskFreeGB
-Write-Info "Disk C: free space before: $freeBefore GB"
+$freeBefore = Get-DiskFreeGB $driveLetter
+Write-Info "Disk $winDrive free space before: $freeBefore GB"
 
 # ─── 1. User Temp ─────────────────────────────────────────────────────────────
 
@@ -90,12 +112,12 @@ Remove-Items -path $env:TEMP -label "User TEMP ($env:TEMP)"
 # ─── 2. System Temp ───────────────────────────────────────────────────────────
 
 Write-Header "2. System Temp Files"
-Remove-Items -path "C:\Windows\Temp" -label "Windows Temp"
+Remove-Items -path "$env:SystemRoot\Temp" -label "Windows Temp"
 
 # ─── 3. Prefetch ──────────────────────────────────────────────────────────────
 
 Write-Header "3. Prefetch Cache"
-Remove-Items -path "C:\Windows\Prefetch" -label "Windows Prefetch"
+Remove-Items -path "$env:SystemRoot\Prefetch" -label "Windows Prefetch"
 
 # ─── 4. Windows Update cache ──────────────────────────────────────────────────
 
@@ -103,7 +125,7 @@ Write-Header "4. Windows Update Download Cache"
 try {
     Stop-Service -Name wuauserv -Force -ErrorAction SilentlyContinue
     Write-Info "Windows Update service stopped"
-    Remove-Items -path "C:\Windows\SoftwareDistribution\Download" -label "WU Download Cache"
+    Remove-Items -path "$env:SystemRoot\SoftwareDistribution\Download" -label "WU Download Cache"
     Start-Service -Name wuauserv -ErrorAction SilentlyContinue
     Write-Info "Windows Update service restarted"
 } catch {
@@ -125,27 +147,18 @@ try {
 
 Write-Header "6. Browser Caches"
 
-# Chrome
-$chromeCachePath = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Cache"
-Remove-Items -path $chromeCachePath -label "Chrome Cache"
-$chromeCodeCachePath = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Code Cache"
-Remove-Items -path $chromeCodeCachePath -label "Chrome Code Cache"
+Clean-BrowserProfiles "$env:LOCALAPPDATA\Google\Chrome\User Data"          "Chrome"
+Clean-BrowserProfiles "$env:LOCALAPPDATA\Microsoft\Edge\User Data"         "Edge"
+Clean-BrowserProfiles "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data" "Brave"
 
-# Edge
-$edgeCachePath = "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Cache"
-Remove-Items -path $edgeCachePath -label "Edge Cache"
-$edgeCodeCachePath = "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Code Cache"
-Remove-Items -path $edgeCodeCachePath -label "Edge Code Cache"
-
-# Firefox — iterate over all profiles
-$ffProfilesRoot = "$env:LOCALAPPDATA\Mozilla\Firefox\Profiles"
+$ffProfilesRoot = "$env:APPDATA\Mozilla\Firefox\Profiles"
 if (Test-Path $ffProfilesRoot) {
     $ffProfiles = Get-ChildItem -Path $ffProfilesRoot -Directory -ErrorAction SilentlyContinue
     if ($ffProfiles) {
         foreach ($profile in $ffProfiles) {
-            Remove-Items -path "$($profile.FullName)\cache2"        -label "Firefox cache2 [$($profile.Name)]"
-            Remove-Items -path "$($profile.FullName)\OfflineCache"  -label "Firefox OfflineCache [$($profile.Name)]"
-            Remove-Items -path "$($profile.FullName)\thumbnails"    -label "Firefox thumbnails [$($profile.Name)]"
+            Remove-Items -path "$($profile.FullName)\cache2"       -label "Firefox cache2 [$($profile.Name)]"
+            Remove-Items -path "$($profile.FullName)\OfflineCache" -label "Firefox OfflineCache [$($profile.Name)]"
+            Remove-Items -path "$($profile.FullName)\thumbnails"   -label "Firefox thumbnails [$($profile.Name)]"
         }
     } else {
         Write-Skip "Firefox — no profiles found"
@@ -157,8 +170,8 @@ if (Test-Path $ffProfilesRoot) {
 # ─── 7. Windows Error Reporting logs ─────────────────────────────────────────
 
 Write-Header "7. Windows Error Reporting Logs"
-Remove-Items -path "C:\ProgramData\Microsoft\Windows\WER\ReportArchive" -label "WER Archive"
-Remove-Items -path "C:\ProgramData\Microsoft\Windows\WER\ReportQueue"   -label "WER Queue"
+Remove-Items -path "$env:ProgramData\Microsoft\Windows\WER\ReportArchive" -label "WER Archive"
+Remove-Items -path "$env:ProgramData\Microsoft\Windows\WER\ReportQueue"   -label "WER Queue"
 
 # ─── 8. DNS Flush ─────────────────────────────────────────────────────────────
 
@@ -172,20 +185,23 @@ try {
 
 # ─── 9. Drive Optimization ────────────────────────────────────────────────────
 
-Write-Header "9. Drive Optimization (C:)"
+Write-Header "9. Drive Optimization ($winDrive)"
 try {
-    $physDisk = Get-PhysicalDisk | Where-Object { $_.DeviceID -eq 0 } | Select-Object -First 1
+    $partition  = Get-Partition -DriveLetter $driveLetter -ErrorAction Stop
+    $diskNumber = $partition.DiskNumber
+    $physDisk   = Get-PhysicalDisk | Where-Object { $_.DeviceID -eq $diskNumber } | Select-Object -First 1
+
     if ($physDisk -and $physDisk.MediaType -eq 'SSD') {
-        Write-Info "SSD detected — running TRIM (Retrim)"
-        Optimize-Volume -DriveLetter C -ReTrim -Verbose:$false
+        Write-Info "SSD detected — running TRIM"
+        Optimize-Volume -DriveLetter $driveLetter -ReTrim -Verbose:$false
         Write-OK "SSD TRIM completed"
     } elseif ($physDisk -and $physDisk.MediaType -eq 'HDD') {
         Write-Info "HDD detected — running Defrag"
-        Optimize-Volume -DriveLetter C -Defrag -Verbose:$false
+        Optimize-Volume -DriveLetter $driveLetter -Defrag -Verbose:$false
         Write-OK "HDD Defrag completed"
     } else {
         Write-Info "Drive type unknown — attempting TRIM"
-        Optimize-Volume -DriveLetter C -ReTrim -Verbose:$false
+        Optimize-Volume -DriveLetter $driveLetter -ReTrim -Verbose:$false
         Write-OK "Optimization completed"
     }
 } catch {
@@ -196,20 +212,21 @@ try {
 
 Write-Header "DONE — Summary"
 
-$freeAfter  = Get-DiskFreeGB
-$freedGB    = [math]::Round($freeAfter - $freeBefore, 2)
-$freedMB    = [math]::Round($freedGB * 1024, 0)
+$freeAfter = Get-DiskFreeGB $driveLetter
+$freedGB   = [math]::Round($freeAfter - $freeBefore, 2)
+$freedMB   = [math]::Round($freedGB * 1024, 0)
 
 Write-Host ""
-Write-Host "  Before : $freeBefore GB free" -ForegroundColor White
-Write-Host "  After  : $freeAfter GB free"  -ForegroundColor White
+Write-Host "  PC      : $env:COMPUTERNAME ($env:USERNAME)" -ForegroundColor White
+Write-Host "  Before  : $freeBefore GB free" -ForegroundColor White
+Write-Host "  After   : $freeAfter GB free"  -ForegroundColor White
 
 if ($freedGB -gt 0) {
-    Write-Host "  Freed  : +$freedGB GB ($freedMB MB)" -ForegroundColor Green
+    Write-Host "  Freed   : +$freedGB GB ($freedMB MB)" -ForegroundColor Green
 } elseif ($freedGB -eq 0) {
-    Write-Host "  Freed  : ~0 GB (locked files skipped or already clean)" -ForegroundColor Yellow
+    Write-Host "  Freed   : ~0 GB (locked files skipped or already clean)" -ForegroundColor Yellow
 } else {
-    Write-Host "  Freed  : $freedGB GB (some space used by logs/optimization)" -ForegroundColor Yellow
+    Write-Host "  Freed   : $freedGB GB (some space used by logs/optimization)" -ForegroundColor Yellow
 }
 
 Write-Host ""
