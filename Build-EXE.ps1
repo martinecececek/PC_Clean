@@ -26,18 +26,12 @@ $cleanerScript = @'
 
 $ErrorActionPreference = 'SilentlyContinue'
 
-# Startup marker - helps diagnose how far the script gets
-"$(Get-Date) | STARTED | $env:COMPUTERNAME | $env:USERNAME" | Set-Content "$env:TEMP\PC-Clean-startup.txt" -Encoding UTF8
-
-# --- Admin check ---
+# --- Self-elevate if not admin ---
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
-    Write-Host ""
-    Write-Host "  [ERROR] This script must be run as Administrator." -ForegroundColor Red
-    Write-Host "  Right-click the EXE and select 'Run as administrator'." -ForegroundColor Yellow
-    Write-Host ""
-    Read-Host "  Press Enter to exit"
-    exit 1
+    $exePath = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+    Start-Process -FilePath $exePath -Verb RunAs
+    exit
 }
 
 try {
@@ -338,7 +332,6 @@ $ok = Invoke-WithSpinner "Compiling PC-Clean.exe" {
     Invoke-ps2exe `
         -inputFile  $using:tempScript `
         -outputFile $using:outputFile `
-        -requireAdmin                 `
         -noConsole:$false             `
         -title       "PC Cleaner"             `
         -description "Safe Windows PC cleanup and optimization" `
