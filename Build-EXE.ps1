@@ -16,7 +16,6 @@ Write-Host ""
 # --- Embedded cleaner script ---
 
 $cleanerScript = @'
-#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
     PC Cleaner - Safe Windows cleanup and optimization script.
@@ -25,8 +24,21 @@ $cleanerScript = @'
     error logs, flushes DNS, and optimizes drives. Saves a log to the Desktop.
 #>
 
-Set-StrictMode -Version Latest
 $ErrorActionPreference = 'SilentlyContinue'
+
+# --- Admin check ---
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin) {
+    Write-Host ""
+    Write-Host "  [ERROR] This script must be run as Administrator." -ForegroundColor Red
+    Write-Host "  Right-click the EXE and select 'Run as administrator'." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  Press any key to exit..." -ForegroundColor DarkGray
+    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    exit 1
+}
+
+try {
 
 # ─── Colors & helpers ───────────────────────────────────────────────────────
 
@@ -86,7 +98,7 @@ $winDrive   = $env:SystemDrive.TrimEnd('\')
 $driveLetter = $winDrive.TrimEnd(':')
 
 $logPath = "$env:USERPROFILE\Desktop\PC-Clean-Log.txt"
-Start-Transcript -Path $logPath -Force | Out-Null
+try { Start-Transcript -Path $logPath -Force | Out-Null } catch { $logPath = "unavailable" }
 
 Write-Host ""
 Write-Host "  ██████╗  ██████╗    ██████╗██╗     ███████╗ █████╗ ███╗   ██╗" -ForegroundColor Magenta
@@ -233,10 +245,36 @@ Write-Host ""
 Write-Host "  Log saved to: $logPath" -ForegroundColor DarkGray
 Write-Host ""
 
-Stop-Transcript | Out-Null
+try { Stop-Transcript | Out-Null } catch {}
 
 Write-Host "  Press any key to exit..." -ForegroundColor DarkGray
 $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+
+} catch {
+    $errMsg = @"
+PC Cleaner - FATAL ERROR
+========================
+Date : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+PC   : $env:COMPUTERNAME
+User : $env:USERNAME
+
+Error:
+$_
+
+Stack trace:
+$($_.ScriptStackTrace)
+"@
+    $errFile = "$env:USERPROFILE\Desktop\PC-Clean-ERROR.txt"
+    try { $errMsg | Set-Content -Path $errFile -Encoding UTF8 } catch {}
+    try { Stop-Transcript | Out-Null } catch {}
+
+    Write-Host ""
+    Write-Host "  [FATAL ERROR] $_" -ForegroundColor Red
+    Write-Host "  Error saved to: $errFile" -ForegroundColor Yellow
+    Write-Host ""
+    Read-Host "  Press Enter to exit"
+    exit 1
+}
 '@
 
 # --- Spinner helper ---
