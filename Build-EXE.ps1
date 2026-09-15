@@ -1,253 +1,204 @@
 <#
-.SYNOPSIS
-    PC Cleaner - Safe Windows cleanup and optimization script.
-.DESCRIPTION
-    Cleans temp files, browser caches, Windows Update cache, Recycle Bin,
-    error logs, flushes DNS, and optimizes drives. Saves a log to the Desktop.
+  Small automatic PC cleanup app - all in one file.
+  Runs basic, non-destructive cleanup tasks (temp files, recycle bin, caches).
+  Tries to elevate to Administrator for deeper cleanup; falls back to
+  user-level-only cleanup if elevation isn't available.
+  On first run it also creates a "PC Clean" Desktop shortcut (broom icon,
+  always requests admin) so future runs are a simple double-click.
 #>
 
-$ErrorActionPreference = 'SilentlyContinue'
+# ---- Self-install: create Desktop shortcut on first run ----
+function Install-DesktopShortcut {
+    $desktop = [Environment]::GetFolderPath('Desktop')
+    $lnkPath = Join-Path $desktop 'PC Clean.lnk'
+    if (Test-Path -LiteralPath $lnkPath) { return }
 
-# --- Self-elevate if not admin ---
-$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    $powershellExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+
+    $broomIcon = Join-Path $env:SystemRoot 'System32\cleanmgr.exe'
+    if (Test-Path -LiteralPath $broomIcon) {
+        $iconLocation = "$broomIcon,0"
+    } else {
+        $iconLocation = Join-Path $env:SystemRoot 'System32\shell32.dll,-46'
+    }
+
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcut = $shell.CreateShortcut($lnkPath)
+    $shortcut.TargetPath = $powershellExe
+    $shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
+    $shortcut.WorkingDirectory = Split-Path -Parent $PSCommandPath
+    $shortcut.IconLocation = $iconLocation
+    $shortcut.Description = 'Spustí základní čištění PC'
+    $shortcut.Save()
+
+    # Force "Run as administrator" on the shortcut so double-clicking it
+    # always prompts UAC directly, without a non-elevated relaunch hop.
+    $bytes = [System.IO.File]::ReadAllBytes($lnkPath)
+    $bytes[0x15] = $bytes[0x15] -bor 0x20
+    [System.IO.File]::WriteAllBytes($lnkPath, $bytes)
+
+    Write-Host "Zástupce na ploše vytvořen: $lnkPath" -ForegroundColor Green
+}
+
+Install-DesktopShortcut
+
+# ---- Elevation bootstrap ----
+$currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+$isAdmin = $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
 if (-not $isAdmin) {
-    Start-Process PowerShell -ArgumentList "-ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
-    exit
-}
-
-try {
-
-# --- Helpers ---
-
-function Write-Header([string]$text) {
-    Write-Host "`n================================================" -ForegroundColor Cyan
-    Write-Host "  $text" -ForegroundColor Cyan
-    Write-Host "================================================" -ForegroundColor Cyan
-}
-
-function Write-OK([string]$msg)   { Write-Host "  [OK]      $msg" -ForegroundColor Green }
-function Write-Skip([string]$msg) { Write-Host "  [SKIPPED] $msg" -ForegroundColor Yellow }
-function Write-Fail([string]$msg) { Write-Host "  [ERROR]   $msg" -ForegroundColor Red }
-function Write-Info([string]$msg) { Write-Host "  [INFO]    $msg" -ForegroundColor White }
-
-function Remove-Items([string]$path, [string]$label) {
-    if (-not (Test-Path $path)) {
-        Write-Skip "$label - path not found"
-        return
-    }
     try {
-        $items = Get-ChildItem -Path $path -Recurse -Force -ErrorAction SilentlyContinue
-        $count = ($items | Measure-Object).Count
-        Remove-Item -Path "$path\*" -Recurse -Force -ErrorAction SilentlyContinue
-        Write-OK "$label - $count item(s) removed"
+        Start-Process -FilePath 'powershell.exe' `
+            -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"") `
+            -Verb RunAs -ErrorAction Stop
+        exit
     } catch {
-        Write-Fail "$label - $_"
+        Write-Host "Zvýšení oprávnění odmítnuto nebo nedostupné - pokračuji pouze s čištěním na úrovni uživatele." -ForegroundColor Yellow
     }
 }
 
-function Get-DiskFreeGB([string]$driveLetter) {
-    $disk = Get-PSDrive -Name $driveLetter -ErrorAction SilentlyContinue
-    if ($disk) { return [math]::Round($disk.Free / 1GB, 2) }
-    return 0
-}
+$results = New-Object System.Collections.Generic.List[object]
 
-function Clean-BrowserProfiles([string]$userDataRoot, [string]$browser) {
-    if (-not (Test-Path $userDataRoot)) {
-        Write-Skip "$browser - not installed"
-        return
-    }
-    $profiles = Get-ChildItem -Path $userDataRoot -Directory -ErrorAction SilentlyContinue |
-                Where-Object { $_.Name -match '^(Default|Profile \d+)$' }
-    if (-not $profiles) {
-        Write-Skip "$browser - no profiles found"
-        return
-    }
-    foreach ($profile in $profiles) {
-        $label = if ($profile.Name -eq 'Default') { $browser } else { "$browser [$($profile.Name)]" }
-        Remove-Items -path "$($profile.FullName)\Cache"      -label "$label Cache"
-        Remove-Items -path "$($profile.FullName)\Code Cache" -label "$label Code Cache"
-    }
-}
-
-# --- Startup ---
-
-$winDrive    = $env:SystemDrive.TrimEnd('\')
-$driveLetter = $winDrive.TrimEnd(':')
-
-$logPath = "$env:TEMP\PC-Clean-Log.txt"
-try { Start-Transcript -Path $logPath -Force | Out-Null } catch { $logPath = "unavailable" }
-
-Write-Host ""
-Write-Host "  PC CLEANER" -ForegroundColor Magenta
-Write-Host "  Safe Windows cleanup and optimization" -ForegroundColor Magenta
-Write-Host ""
-Write-Host "  Date  : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor White
-Write-Host "  PC    : $env:COMPUTERNAME" -ForegroundColor White
-Write-Host "  User  : $env:USERNAME" -ForegroundColor White
-Write-Host "  Drive : $winDrive" -ForegroundColor White
-Write-Host "  Log   : $logPath" -ForegroundColor DarkGray
-Write-Host ""
-
-$freeBefore = Get-DiskFreeGB $driveLetter
-Write-Info "Disk $winDrive free space before: $freeBefore GB"
-
-# --- 1. User Temp ---
-
-Write-Header "1. User Temp Files"
-Remove-Items -path $env:TEMP -label "User TEMP"
-
-# --- 2. System Temp ---
-
-Write-Header "2. System Temp Files"
-Remove-Items -path "$env:SystemRoot\Temp" -label "Windows Temp"
-
-# --- 3. Prefetch ---
-
-Write-Header "3. Prefetch Cache"
-Remove-Items -path "$env:SystemRoot\Prefetch" -label "Windows Prefetch"
-
-# --- 4. Windows Update cache ---
-
-Write-Header "4. Windows Update Download Cache"
-try {
-    Stop-Service -Name wuauserv -Force -ErrorAction SilentlyContinue
-    Write-Info "Windows Update service stopped"
-    Remove-Items -path "$env:SystemRoot\SoftwareDistribution\Download" -label "WU Download Cache"
-    Start-Service -Name wuauserv -ErrorAction SilentlyContinue
-    Write-Info "Windows Update service restarted"
-} catch {
-    Write-Fail "Windows Update cache - $_"
-    Start-Service -Name wuauserv -ErrorAction SilentlyContinue
-}
-
-# --- 5. Recycle Bin ---
-
-Write-Header "5. Recycle Bin"
-try {
-    Clear-RecycleBin -Force -ErrorAction SilentlyContinue
-    Write-OK "Recycle Bin emptied"
-} catch {
-    Write-Fail "Recycle Bin - $_"
-}
-
-# --- 6. Browser Caches ---
-
-Write-Header "6. Browser Caches"
-
-Clean-BrowserProfiles "$env:LOCALAPPDATA\Google\Chrome\User Data"               "Chrome"
-Clean-BrowserProfiles "$env:LOCALAPPDATA\Microsoft\Edge\User Data"              "Edge"
-Clean-BrowserProfiles "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data" "Brave"
-
-$ffProfilesRoot = "$env:APPDATA\Mozilla\Firefox\Profiles"
-if (Test-Path $ffProfilesRoot) {
-    $ffProfiles = Get-ChildItem -Path $ffProfilesRoot -Directory -ErrorAction SilentlyContinue
-    if ($ffProfiles) {
-        foreach ($profile in $ffProfiles) {
-            Remove-Items -path "$($profile.FullName)\cache2"       -label "Firefox cache2 [$($profile.Name)]"
-            Remove-Items -path "$($profile.FullName)\OfflineCache" -label "Firefox OfflineCache [$($profile.Name)]"
-            Remove-Items -path "$($profile.FullName)\thumbnails"   -label "Firefox thumbnails [$($profile.Name)]"
-        }
-    } else {
-        Write-Skip "Firefox - no profiles found"
-    }
-} else {
-    Write-Skip "Firefox - not installed"
-}
-
-# --- 7. Windows Error Reporting logs ---
-
-Write-Header "7. Windows Error Reporting Logs"
-Remove-Items -path "$env:ProgramData\Microsoft\Windows\WER\ReportArchive" -label "WER Archive"
-Remove-Items -path "$env:ProgramData\Microsoft\Windows\WER\ReportQueue"   -label "WER Queue"
-
-# --- 8. DNS Flush ---
-
-Write-Header "8. DNS Cache Flush"
-try {
-    & ipconfig /flushdns | Out-Null
-    Write-OK "DNS cache flushed"
-} catch {
-    Write-Fail "DNS flush - $_"
-}
-
-# --- 9. Drive Optimization ---
-
-Write-Header "9. Drive Optimization ($winDrive)"
-try {
-    $partition  = Get-Partition -DriveLetter $driveLetter -ErrorAction Stop
-    $diskNumber = $partition.DiskNumber
-    $physDisk   = Get-PhysicalDisk | Where-Object { $_.DeviceID -eq $diskNumber } | Select-Object -First 1
-
-    if ($physDisk -and $physDisk.MediaType -eq 'SSD') {
-        Write-Info "SSD detected - running TRIM"
-        Optimize-Volume -DriveLetter $driveLetter -ReTrim -Verbose:$false
-        Write-OK "SSD TRIM completed"
-    } elseif ($physDisk -and $physDisk.MediaType -eq 'HDD') {
-        Write-Info "HDD detected - running Defrag"
-        Optimize-Volume -DriveLetter $driveLetter -Defrag -Verbose:$false
-        Write-OK "HDD Defrag completed"
-    } else {
-        Write-Info "Drive type unknown - attempting TRIM"
-        Optimize-Volume -DriveLetter $driveLetter -ReTrim -Verbose:$false
-        Write-OK "Optimization completed"
-    }
-} catch {
-    Write-Fail "Drive optimization - $_"
-}
-
-# --- Final Report ---
-
-Write-Header "DONE - Summary"
-
-$freeAfter = Get-DiskFreeGB $driveLetter
-$freedGB   = [math]::Round($freeAfter - $freeBefore, 2)
-$freedMB   = [math]::Round($freedGB * 1024, 0)
-
-Write-Host ""
-Write-Host "  PC     : $env:COMPUTERNAME ($env:USERNAME)" -ForegroundColor White
-Write-Host "  Before : $freeBefore GB free" -ForegroundColor White
-Write-Host "  After  : $freeAfter GB free"  -ForegroundColor White
-
-if ($freedGB -gt 0) {
-    Write-Host "  Freed  : +$freedGB GB ($freedMB MB)" -ForegroundColor Green
-} elseif ($freedGB -eq 0) {
-    Write-Host "  Freed  : ~0 GB (locked files skipped or already clean)" -ForegroundColor Yellow
-} else {
-    Write-Host "  Freed  : $freedGB GB (some space used by logs/optimization)" -ForegroundColor Yellow
-}
-
-Write-Host ""
-Write-Host "  Log saved to: $logPath" -ForegroundColor DarkGray
-Write-Host ""
-
-try { Stop-Transcript | Out-Null } catch {}
-
-Read-Host "  Press Enter to exit"
-
-} catch {
-    $errLines = @(
-        "PC Cleaner - FATAL ERROR",
-        "========================",
-        "Date : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')",
-        "PC   : $env:COMPUTERNAME",
-        "User : $env:USERNAME",
-        "",
-        "Error:",
-        "$_",
-        "",
-        "Stack trace:",
-        "$($_.ScriptStackTrace)"
+function Remove-CleanItems {
+    param(
+        [string]$TaskName,
+        [string]$Path,
+        [switch]$RequiresAdmin
     )
-    $errMsg  = $errLines -join "`r`n"
-    $errFile = "$env:TEMP\PC-Clean-ERROR.txt"
-    $errMsg | Set-Content -Path $errFile -Encoding UTF8
-    try { $errMsg | Set-Content -Path "$env:USERPROFILE\Desktop\PC-Clean-ERROR.txt" -Encoding UTF8 } catch {}
-    try { Stop-Transcript | Out-Null } catch {}
 
-    Write-Host ""
-    Write-Host "  [FATAL ERROR] $_" -ForegroundColor Red
-    Write-Host "  Error log saved to: $errFile" -ForegroundColor Yellow
-    Write-Host ""
-    Read-Host "  Press Enter to exit"
-    exit 1
+    if ($RequiresAdmin -and -not $isAdmin) {
+        $results.Add([pscustomobject]@{ Task = $TaskName; Items = 0; FreedMB = 0; Status = 'Přeskočeno (vyžaduje admin)' })
+        return
+    }
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        $results.Add([pscustomobject]@{ Task = $TaskName; Items = 0; FreedMB = 0; Status = 'Nenalezeno' })
+        return
+    }
+
+    $items = Get-ChildItem -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
+    $itemCount = 0
+    $bytesFreed = 0L
+
+    foreach ($item in $items) {
+        if ($item.PSIsContainer) { continue }
+        try {
+            $size = $item.Length
+            Remove-Item -LiteralPath $item.FullName -Force -ErrorAction Stop
+            $bytesFreed += $size
+            $itemCount++
+        } catch {
+            # locked/in-use file - skip silently
+        }
+    }
+
+    # best-effort cleanup of now-empty subfolders
+    Get-ChildItem -LiteralPath $Path -Recurse -Force -Directory -ErrorAction SilentlyContinue |
+        Sort-Object { $_.FullName.Length } -Descending |
+        ForEach-Object {
+            try {
+                if (-not (Get-ChildItem -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue)) {
+                    Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+                }
+            } catch {}
+        }
+
+    $results.Add([pscustomobject]@{
+        Task    = $TaskName
+        Items   = $itemCount
+        FreedMB = [math]::Round($bytesFreed / 1MB, 2)
+        Status  = 'OK'
+    })
 }
+
+function Remove-CleanItemsByFilter {
+    param(
+        [string]$TaskName,
+        [string]$Path,
+        [string]$Filter
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        $results.Add([pscustomobject]@{ Task = $TaskName; Items = 0; FreedMB = 0; Status = 'Nenalezeno' })
+        return
+    }
+
+    $files = Get-ChildItem -LiteralPath $Path -Filter $Filter -Force -ErrorAction SilentlyContinue
+    $itemCount = 0
+    $bytesFreed = 0L
+
+    foreach ($file in $files) {
+        try {
+            $size = $file.Length
+            Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop
+            $bytesFreed += $size
+            $itemCount++
+        } catch {
+            # locked/in-use file - skip silently
+        }
+    }
+
+    $results.Add([pscustomobject]@{
+        Task    = $TaskName
+        Items   = $itemCount
+        FreedMB = [math]::Round($bytesFreed / 1MB, 2)
+        Status  = 'OK'
+    })
+}
+
+Write-Host "Spouštím čištění PC $(if ($isAdmin) { '(se zvýšenými oprávněními)' } else { '(pouze uživatelská úroveň)' })..." -ForegroundColor Cyan
+Write-Host ""
+
+# ---- User-level tasks (always run) ----
+Remove-CleanItems -TaskName 'Dočasné soubory uživatele' -Path $env:TEMP
+
+try {
+    Clear-RecycleBin -Force -ErrorAction Stop
+    $results.Add([pscustomobject]@{ Task = 'Koš'; Items = 0; FreedMB = 0; Status = 'Vyprázdněno' })
+} catch {
+    $results.Add([pscustomobject]@{ Task = 'Koš'; Items = 0; FreedMB = 0; Status = 'Prázdný/Přeskočeno' })
+}
+
+Remove-CleanItemsByFilter -TaskName 'Mezipaměť miniatur' `
+    -Path "$env:LOCALAPPDATA\Microsoft\Windows\Explorer" -Filter 'thumbcache_*.db'
+
+Remove-CleanItems -TaskName 'Hlášení chyb Windows (uživatel)' -Path "$env:LOCALAPPDATA\Microsoft\Windows\WER"
+
+try {
+    ipconfig /flushdns | Out-Null
+    $results.Add([pscustomobject]@{ Task = 'Mezipaměť DNS'; Items = 0; FreedMB = 0; Status = 'Vymazáno' })
+} catch {
+    $results.Add([pscustomobject]@{ Task = 'Mezipaměť DNS'; Items = 0; FreedMB = 0; Status = 'Selhalo' })
+}
+
+# ---- Admin-only tasks ----
+Remove-CleanItems -TaskName 'Systémové dočasné soubory' -Path "$env:WINDIR\Temp" -RequiresAdmin
+
+if ($isAdmin) {
+    $wuService = Get-Service -Name wuauserv -ErrorAction SilentlyContinue
+    try {
+        if ($wuService) { Stop-Service -Name wuauserv -Force -ErrorAction SilentlyContinue }
+        Remove-CleanItems -TaskName 'Mezipaměť Windows Update' -Path "$env:WINDIR\SoftwareDistribution\Download" -RequiresAdmin
+    } finally {
+        if ($wuService) { Start-Service -Name wuauserv -ErrorAction SilentlyContinue }
+    }
+} else {
+    $results.Add([pscustomobject]@{ Task = 'Mezipaměť Windows Update'; Items = 0; FreedMB = 0; Status = 'Přeskočeno (vyžaduje admin)' })
+}
+
+Remove-CleanItems -TaskName 'Prefetch' -Path "$env:WINDIR\Prefetch" -RequiresAdmin
+Remove-CleanItems -TaskName 'Mezipaměť optimalizace doručování' -Path "$env:WINDIR\SoftwareDistribution\DeliveryOptimization" -RequiresAdmin
+
+# ---- Summary ----
+Write-Host ""
+Write-Host "Souhrn čištění" -ForegroundColor Cyan
+Write-Host "--------------"
+$results | Format-Table @{Label='Úkol'; Expression={$_.Task}}, @{Label='Položky'; Expression={$_.Items}}, @{Label='Uvolněno (MB)'; Expression={$_.FreedMB}}, @{Label='Stav'; Expression={$_.Status}} -AutoSize
+
+$totalMB = [math]::Round(($results | Measure-Object -Property FreedMB -Sum).Sum, 2)
+Write-Host ""
+Write-Host "Celkem uvolněno místa: $totalMB MB" -ForegroundColor Green
+Write-Host "Režim spuštění: $(if ($isAdmin) { 'Správce (úplné čištění)' } else { 'Pouze uživatelská úroveň (některé úkoly přeskočeny)' })"
+
+Write-Host ""
+Read-Host "Stiskněte Enter pro zavření"
